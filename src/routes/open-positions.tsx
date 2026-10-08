@@ -1,6 +1,7 @@
 import { AppShell } from "@/components/app-shell";
 import {
     DeletePositionDialog,
+    PositionCsvImportDialog,
     PositionFormDialog,
     PositionStatusDialog,
 } from "@/components/position-form-dialog";
@@ -41,6 +42,7 @@ import {
     RotateCcw,
     Search,
     Trash2,
+    Upload,
     Users,
     X,
 } from "lucide-react";
@@ -121,6 +123,7 @@ function OpenPositionsPage() {
   const [departmentId, setDepartmentId] = useState("ALL");
   const [selected, setSelected] = useState<Job | null>(null);
   const [formOpen, setFormOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [editing, setEditing] = useState<Job | null>(null);
   const [statusTarget, setStatusTarget] = useState<{ job: Job; status: PositionStatus } | null>(
     null,
@@ -176,16 +179,21 @@ function OpenPositionsPage() {
       title="Open Positions"
       subtitle="Manage position codes, ownership and linked candidate activity."
       actions={
-        <Button
-          size="sm"
-          className="gap-2"
-          onClick={() => {
-            setEditing(null);
-            setFormOpen(true);
-          }}
-        >
-          <Plus className="size-4" /> Open position
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" className="gap-2" onClick={() => setImportOpen(true)}>
+            <Upload className="size-4" /> Import CSV
+          </Button>
+          <Button
+            size="sm"
+            className="gap-2"
+            onClick={() => {
+              setEditing(null);
+              setFormOpen(true);
+            }}
+          >
+            <Plus className="size-4" /> Open position
+          </Button>
+        </div>
       }
     >
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -466,6 +474,7 @@ function OpenPositionsPage() {
       </div>
 
       <PositionFormDialog open={formOpen} onOpenChange={setFormOpen} job={editing} />
+      <PositionCsvImportDialog open={importOpen} onOpenChange={setImportOpen} />
       <PositionStatusDialog
         job={statusTarget?.job ?? null}
         status={statusTarget?.status ?? "CLOSED"}

@@ -2,6 +2,15 @@ import { supabase } from "@/integrations/supabase/client";
 import type { Json } from "@/integrations/supabase/types";
 import { queryOptions } from "@tanstack/react-query";
 import { format } from "date-fns";
+import {
+  appSettingsFromRow,
+  slaBucketLabels,
+  slaLevel,
+  type AppSettings,
+  type SlaThresholds,
+} from "./app-settings";
+
+export { slaLevel, type SlaLevel, type SlaThresholds } from "./app-settings";
 
 export const STAGES = ["SCREENING", "L1", "L2", "L3", "OFFER", "REJECTED"] as const;
 export type Stage = (typeof STAGES)[number];
@@ -71,6 +80,7 @@ export type Candidate = {
   last_name: string;
   email: string;
   phone: string | null;
+  resume_url: string | null;
   job_id: string | null;
   source: string;
   experience_years: number;
@@ -90,6 +100,398 @@ export type Candidate = {
     departments?: Pick<Department, "id" | "name" | "code"> | null;
   } | null;
 };
+
+export const IMPORT_ROW_LIMIT = 100;
+
+function normalizeCandidateResumeUrl(value: string): string | null {
+  if (/\s/u.test(value)) return null;
+
+  const authorityMatch = value.match(/^https:\/\/([^/?#]+)(?:[/?#][\s\S]*)?$/i);
+  const authority = authorityMatch?.[1];
+  if (!authority || authority.includes("@")) return null;
+
+  let host: string;
+  let port: string | undefined;
+  const ipv6Match = authority.match(/^(\[[0-9a-f:.]+\])(?::([0-9]+))?$/i);
+  const ipv6Host = ipv6Match?.[1];
+  if (ipv6Match && ipv6Host) {
+    host = ipv6Host;
+    port = ipv6Match[2];
+  } else {
+    const hostMatch = authority.match(/^([^:]+)(?::([0-9]+))?$/);
+    const matchedHost = hostMatch?.[1];
+    if (!matchedHost) return null;
+    host = matchedHost;
+    port = hostMatch[2];
+  }
+
+  if (port !== undefined && (port.length > 5 || Number(port) > 65535)) return null;
+
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password) return null;
+
+    if (host.startsWith("[")) {
+      if (url.hostname.toLowerCase() !== host.toLowerCase()) return null;
+    } else if (/^[0-9.]+$/.test(host)) {
+      if (!/^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$/.test(host)) {
+        return null;
+      }
+      if (host.split(".").some((octet) => Number(octet) > 255) || url.hostname !== host) {
+        return null;
+      }
+    } else {
+      const dnsName = host.endsWith(".") ? host.slice(0, -1) : host;
+      const labels = dnsName.split(".");
+      if (
+        dnsName.length > 253 ||
+        labels.some(
+          (label) => label.length > 63 || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/i.test(label),
+        ) ||
+        url.hostname.toLowerCase() !== host.toLowerCase()
+      ) {
+        return null;
+      }
+    }
+
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+export type CsvImportIssue = {
+  row: number | null;
+  field: string;
+  message: string;
+};
+
+export type CsvImportPreview<T> = {
+  rows: Array<{ row: number; value: T }>;
+  issues: CsvImportIssue[];
+};
+
+export type CandidateImportRow = {
+  first_name: string;
+  last_name: string;
+  email: string;
+  phone: string | null;
+  job_code: string;
+  source: string;
+  experience_years: number;
+  skills: string[];
+  current_stage: string;
+  resume_url: string | null;
+};
+
+export type PositionImportRow = {
+  title: string;
+  department: string;
+  description: string | null;
+  location: string;
+  required_skills: string[];
+  status: PositionStatus;
+};
+
+type ParsedCsv = {
+  headers: string[];
+  records: string[][];
+  issues: CsvImportIssue[];
+};
+
+function parseCsv(csv: string, expectedHeaders: readonly string[]): ParsedCsv {
+  const records: string[][] = [];
+  const issues: CsvImportIssue[] = [];
+  let record: string[] = [];
+  let field = "";
+  let quoted = false;
+  let afterQuote = false;
+  let malformed = false;
+
+  for (let index = 0; index < csv.length; index += 1) {
+    const char = csv[index] ?? "";
+    if (quoted) {
+      if (char === '"') {
+        if (csv[index + 1] === '"') {
+          field += '"';
+          index += 1;
+        } else {
+          quoted = false;
+          afterQuote = true;
+        }
+      } else {
+        field += char;
+      }
+      continue;
+    }
+
+    if (afterQuote && char !== "," && char !== "\r" && char !== "\n") {
+      if (!/\s/.test(char)) {
+        malformed = true;
+        break;
+      }
+      continue;
+    }
+    if (char === '"') {
+      if (field.length > 0) {
+        malformed = true;
+        break;
+      }
+      quoted = true;
+    } else if (char === ",") {
+      record.push(field);
+      field = "";
+      afterQuote = false;
+    } else if (char === "\r" || char === "\n") {
+      record.push(field);
+      if (record.some((value) => value.trim() !== "")) records.push(record);
+      record = [];
+      field = "";
+      afterQuote = false;
+      if (char === "\r" && csv[index + 1] === "\n") index += 1;
+    } else {
+      field += char;
+    }
+  }
+
+  if (quoted) malformed = true;
+  if (malformed) {
+    issues.push({ row: records.length + 1, field: "CSV", message: "Malformed CSV quoting" });
+    return { headers: [], records: [], issues };
+  }
+  if (field.length || record.length) {
+    record.push(field);
+    if (record.some((value) => value.trim() !== "")) records.push(record);
+  }
+  if (!records.length) {
+    issues.push({ row: 1, field: "header", message: "CSV file is empty" });
+    return { headers: [], records: [], issues };
+  }
+
+  const headerRecord = records[0] ?? [];
+  const headers = headerRecord.map((value, index) => {
+    const clean = value.trim();
+    return index === 0 ? clean.replace(/^\uFEFF/, "") : clean;
+  });
+  const missing = expectedHeaders.filter((header) => !headers.includes(header));
+  const extra = headers.filter((header) => !expectedHeaders.includes(header));
+  const duplicates = headers.filter((header, index) => headers.indexOf(header) !== index);
+  if (missing.length || extra.length || duplicates.length) {
+    const details = [
+      missing.length ? `Missing: ${missing.join(", ")}` : "",
+      extra.length ? `Unexpected: ${extra.join(", ")}` : "",
+      duplicates.length ? `Duplicate: ${[...new Set(duplicates)].join(", ")}` : "",
+    ]
+      .filter(Boolean)
+      .join(". ");
+    issues.push({
+      row: 1,
+      field: "header",
+      message: `Headers must match the required set. ${details}`,
+    });
+    return { headers, records: [], issues };
+  }
+
+  const dataRecords = records.slice(1);
+  if (dataRecords.length > IMPORT_ROW_LIMIT) {
+    issues.push({
+      row: null,
+      field: "CSV",
+      message: `The file has ${dataRecords.length} data rows; the maximum is ${IMPORT_ROW_LIMIT}`,
+    });
+    return { headers, records: [], issues };
+  }
+  return { headers, records: dataRecords, issues };
+}
+
+function csvRecords(csv: string, headers: string[]) {
+  const parsed = parseCsv(csv, headers);
+  const widthIssues = parsed.records.flatMap((values, index) =>
+    values.length === parsed.headers.length
+      ? []
+      : [
+          {
+            row: index + 2,
+            field: "CSV",
+            message: `Expected ${parsed.headers.length} columns but found ${values.length}`,
+          },
+        ],
+  );
+  return {
+    records: parsed.records.map((values, index) => ({
+      row: index + 2,
+      values: Object.fromEntries(
+        parsed.headers.map((header, column) => [header, values[column] ?? ""]),
+      ),
+    })),
+    issues: [...parsed.issues, ...widthIssues],
+  };
+}
+
+function splitSkills(value: string) {
+  return value
+    .split(";")
+    .map((skill) => skill.trim())
+    .filter(Boolean);
+}
+
+function addRequiredIssue(issues: CsvImportIssue[], row: number, field: string, value: string) {
+  if (!value.trim()) issues.push({ row, field, message: `${field} is required` });
+}
+
+export function previewCandidateCsv(
+  csv: string,
+  jobs: Job[],
+  existingCandidates: Candidate[],
+): CsvImportPreview<CandidateImportRow> {
+  const headers = [
+    "first_name",
+    "last_name",
+    "email",
+    "phone",
+    "job_code",
+    "source",
+    "experience_years",
+    "skills",
+    "current_stage",
+    "resume_url",
+  ];
+  const parsed = csvRecords(csv, headers);
+  const issues = [...parsed.issues];
+  const seenEmails = new Set<string>();
+  const existingEmails = new Set(
+    existingCandidates.map((candidate) => candidate.email.trim().toLowerCase()),
+  );
+  const openJobs = new Map(
+    jobs.filter((job) => job.status === "OPEN").map((job) => [job.job_code, job]),
+  );
+  const rows = parsed.records.map(({ row, values }) => {
+    const first_name = (values["first_name"] ?? "").trim();
+    const last_name = (values["last_name"] ?? "").trim();
+    const email = (values["email"] ?? "").trim().toLowerCase();
+    const job_code = (values["job_code"] ?? "").trim();
+    const source = (values["source"] ?? "").trim() || "Referral";
+    const experienceText = (values["experience_years"] ?? "").trim();
+    const experience_years = experienceText ? Number(experienceText) : 5;
+    const skills = splitSkills(values["skills"] ?? "");
+    const current_stage = (values["current_stage"] ?? "").trim() || "SCREENING";
+    const rawResumeUrl = values["resume_url"] ?? "";
+    let resume_url: string | null = rawResumeUrl.trim() ? rawResumeUrl : null;
+
+    addRequiredIssue(issues, row, "first_name", first_name);
+    addRequiredIssue(issues, row, "last_name", last_name);
+    addRequiredIssue(issues, row, "email", email);
+    addRequiredIssue(issues, row, "job_code", job_code);
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      issues.push({ row, field: "email", message: "Enter a valid email address" });
+    }
+    if (email && (seenEmails.has(email) || existingEmails.has(email))) {
+      issues.push({
+        row,
+        field: "email",
+        message: "Email is already present in this file or candidates",
+      });
+    }
+    if (email) seenEmails.add(email);
+    if (job_code && !openJobs.has(job_code)) {
+      issues.push({ row, field: "job_code", message: "Must match an existing OPEN job code" });
+    }
+    if (!Number.isFinite(experience_years) || experience_years < 0 || experience_years > 50) {
+      issues.push({
+        row,
+        field: "experience_years",
+        message: "Experience must be between 0 and 50",
+      });
+    }
+    if (!STAGES.includes(current_stage as Stage)) {
+      issues.push({ row, field: "current_stage", message: `Must be one of: ${STAGES.join(", ")}` });
+    }
+    if (resume_url) {
+      const normalizedResumeUrl = normalizeCandidateResumeUrl(resume_url);
+      if (normalizedResumeUrl) {
+        resume_url = normalizedResumeUrl;
+      } else {
+        issues.push({
+          row,
+          field: "resume_url",
+          message:
+            "Use an HTTPS URL with a valid DNS, IPv4, or bracketed IPv6 host and a port from 0 to 65535",
+        });
+      }
+    }
+    return {
+      row,
+      value: {
+        first_name,
+        last_name,
+        email,
+        phone: (values["phone"] ?? "").trim() || null,
+        job_code,
+        source,
+        experience_years,
+        skills,
+        current_stage,
+        resume_url,
+      },
+    };
+  });
+  return { rows, issues };
+}
+
+export function previewPositionCsv(
+  csv: string,
+  departments: Department[],
+): CsvImportPreview<PositionImportRow> {
+  const headers = ["title", "department", "description", "location", "required_skills", "status"];
+  const parsed = csvRecords(csv, headers);
+  const issues = [...parsed.issues];
+  const departmentByName = new Map<string, Department[]>();
+  departments.forEach((department) => {
+    const key = department.name.trim().toLowerCase();
+    departmentByName.set(key, [...(departmentByName.get(key) ?? []), department]);
+  });
+  const rows = parsed.records.map(({ row, values }) => {
+    const title = (values["title"] ?? "").trim();
+    const department = (values["department"] ?? "").trim();
+    const description = (values["description"] ?? "").trim() || null;
+    const location = (values["location"] ?? "").trim() || "Bengaluru, IN";
+    const required_skills = splitSkills(values["required_skills"] ?? "");
+    const status = ((values["status"] ?? "").trim() || "OPEN").toUpperCase() as PositionStatus;
+    addRequiredIssue(issues, row, "title", title);
+    addRequiredIssue(issues, row, "department", department);
+    const matches = departmentByName.get(department.toLowerCase()) ?? [];
+    if (department && matches.length !== 1) {
+      issues.push({
+        row,
+        field: "department",
+        message: matches.length
+          ? "Department name is ambiguous"
+          : "Must match an existing department",
+      });
+    }
+    if (status !== "OPEN" && status !== "CLOSED") {
+      issues.push({ row, field: "status", message: "Must be OPEN or CLOSED" });
+    }
+    const value: PositionImportRow = {
+      title,
+      department: matches.length === 1 ? (matches[0]?.name ?? department) : department,
+      description,
+      location,
+      required_skills,
+      status: status === "CLOSED" ? "CLOSED" : "OPEN",
+    };
+    return { row, value };
+  });
+  return { rows, issues };
+}
+
+export function csvImportErrorReport(issues: CsvImportIssue[]) {
+  const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
+  return [
+    "row,field,error",
+    ...issues.map((issue) => `${issue.row ?? ""},${quote(issue.field)},${quote(issue.message)}`),
+  ].join("\r\n");
+}
 
 export type CandidateSort = "added-newest" | "added-oldest" | "stage-longest" | "stage-shortest";
 
@@ -178,6 +580,7 @@ function normalizedOptions(values: Array<string | null | undefined>): CandidateF
 
 export function deriveCandidateAdvancedFilterOptions(
   candidates: Candidate[],
+  t: SlaThresholds,
 ): CandidateAdvancedFilterOptions {
   const positions = new Map<string, string>();
   const departments = new Map<string, string>();
@@ -212,6 +615,8 @@ export function deriveCandidateAdvancedFilterOptions(
     departmentOptions.push({ value: UNASSIGNED_DEPARTMENT_FILTER, label: "Unassigned" });
   }
 
+  const slaLabels = slaBucketLabels(t);
+
   return {
     positions: positionOptions,
     departments: departmentOptions,
@@ -219,9 +624,9 @@ export function deriveCandidateAdvancedFilterOptions(
     sources: normalizedOptions(candidates.map((candidate) => candidate.source)),
     skills: normalizedOptions(candidates.flatMap((candidate) => candidate.skills)),
     slaBuckets: [
-      { value: "on-track", label: "On track (0-3 days)" },
-      { value: "warning", label: "Warning (4-5 days)" },
-      { value: "breach", label: "Breach (6+ days)" },
+      { value: "on-track", label: slaLabels["on-track"] },
+      { value: "warning", label: slaLabels.warning },
+      { value: "breach", label: slaLabels.breach },
     ],
   };
 }
@@ -305,20 +710,24 @@ export function validateCandidateAdvancedFilters(filters: CandidateAdvancedFilte
   return errors;
 }
 
-function candidateSlaBucket(candidate: Candidate, now: number): CandidateSlaBucket | null {
+function candidateSlaBucket(
+  candidate: Candidate,
+  now: number,
+  t: SlaThresholds,
+): CandidateSlaBucket | null {
   const timestamp = new Date(candidate.status_updated_at).getTime();
   if (!Number.isFinite(timestamp)) return null;
   const days = Math.floor((now - timestamp) / 86_400_000);
   if (days < 0) return null;
-  if (days <= 3) return "on-track";
-  if (days <= 5) return "warning";
-  return "breach";
+  const level = slaLevel(days, t);
+  return level === "ok" ? "on-track" : level;
 }
 
 export function matchesCandidateAdvancedFilters(
   candidate: Candidate,
   filters: CandidateAdvancedFilters,
   now: number,
+  t: SlaThresholds,
 ) {
   const positionValue =
     candidate.job_id && candidate.jobs ? candidate.job_id : UNASSIGNED_POSITION_FILTER;
@@ -338,7 +747,7 @@ export function matchesCandidateAdvancedFilters(
     return false;
 
   if (filters.slaBuckets.length) {
-    const bucket = candidateSlaBucket(candidate, now);
+    const bucket = candidateSlaBucket(candidate, now, t);
     if (!bucket || !filters.slaBuckets.includes(bucket)) return false;
   }
 
@@ -1032,14 +1441,24 @@ export function daysInStage(candidate: Pick<Candidate, "status_updated_at">) {
   return Math.floor((Date.now() - new Date(candidate.status_updated_at).getTime()) / 86400000);
 }
 
-export type SlaLevel = "ok" | "warning" | "breach";
-export function slaLevel(days: number): SlaLevel {
-  if (days > 5) return "breach";
-  if (days > 3) return "warning";
-  return "ok";
+export function isSlaAtRisk(
+  candidate: Pick<Candidate, "current_stage" | "status_updated_at">,
+  t: SlaThresholds,
+) {
+  if (candidate.current_stage === "OFFER" || candidate.current_stage === "REJECTED") return false;
+  return slaLevel(daysInStage(candidate), t) !== "ok";
 }
 
 const db = supabase;
+
+export const appSettingsQuery = queryOptions({
+  queryKey: ["app-settings"],
+  queryFn: async (): Promise<AppSettings> => {
+    const { data, error } = await db.from("app_settings").select("*").eq("id", 1).maybeSingle();
+    if (error) throw error;
+    return appSettingsFromRow(data);
+  },
+});
 
 export const candidatesQuery = queryOptions({
   queryKey: ["candidates"],

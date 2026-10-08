@@ -11,7 +11,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
+import { useAppSettings } from "@/hooks/use-app-settings";
+import { supabase } from "@/integrations/supabase/client";
 import {
+    appSettingsFromRow,
+    appSettingsToRow,
+    validateSlaThresholds,
+    type AppSettings,
+} from "@/lib/app-settings";
+import {
+    appSettingsQuery,
     departmentsQuery,
     initials,
     interviewersQuery,
@@ -19,10 +28,15 @@ import {
     type Department,
     type Interviewer,
 } from "@/lib/hiring";
-import { useQuery } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
-import { Building2, Pencil, Trash2, UserPlus } from "lucide-react";
-import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { Building2, Loader2, Pencil, Trash2, UserPlus } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+
+function sameSettings(a: AppSettings, b: AppSettings) {
+  return (Object.keys(a) as Array<keyof AppSettings>).every((key) => a[key] === b[key]);
+}
 
 export const Route = createFileRoute("/configuration")({
   head: () => ({
@@ -49,14 +63,54 @@ function ConfigurationPage() {
   const interviewers = useQuery(interviewersQuery);
   const departments = useQuery(departmentsQuery);
   const jobs = useQuery(jobsQuery);
-  const [warnDays, setWarnDays] = useState(3);
-  const [breachDays, setBreachDays] = useState(5);
-  const [toggles, setToggles] = useState({
-    autoSchedule: true,
-    aiRisk: true,
-    teamsReminders: true,
-    weeklyDigest: false,
-  });
+  const queryClient = useQueryClient();
+  const { settings, query: settingsQuery } = useAppSettings();
+  const [draft, setDraft] = useState<AppSettings>(settings);
+  const [saving, setSaving] = useState(false);
+  const syncedSettingsRef = useRef(settings);
+
+  useEffect(() => {
+    const previous = syncedSettingsRef.current;
+    syncedSettingsRef.current = settings;
+    setDraft((prev) => (sameSettings(prev, previous) ? settings : prev));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsQuery.dataUpdatedAt]);
+
+  const validationError = validateSlaThresholds(draft);
+  const dirty = !sameSettings(draft, settings);
+  const controlsDisabled = settingsQuery.isPending || saving;
+
+  const updateDraft = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
+    setDraft((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const resetDraft = () => {
+    setDraft(settings);
+  };
+
+  const saveSettings = async () => {
+    if (validationError || !dirty) return;
+    setSaving(true);
+    try {
+      const { data, error } = await supabase
+        .from("app_settings")
+        .update(appSettingsToRow(draft))
+        .eq("id", 1)
+        .select()
+        .single();
+      if (error) throw error;
+      const saved = appSettingsFromRow(data);
+      queryClient.setQueryData(appSettingsQuery.queryKey, saved);
+      await queryClient.invalidateQueries({ queryKey: ["app-settings"] });
+      setDraft(saved);
+      toast.success("Configuration saved — applied across HireCopilot");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not save configuration.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Interviewer | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Interviewer | null>(null);
@@ -72,14 +126,24 @@ function ConfigurationPage() {
       <div className="grid gap-5 lg:grid-cols-2">
         <Card className="gap-0 p-5">
           <p className="font-display text-base font-semibold">SLA thresholds</p>
+          {settingsQuery.isError && (
+            <p className="mt-2 text-xs text-destructive" role="status">
+              Settings couldn't be loaded — showing defaults.
+            </p>
+          )}
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="warn">Amber warning after (days)</Label>
               <Input
                 id="warn"
                 type="number"
-                value={warnDays}
-                onChange={(e) => setWarnDays(Number(e.target.value))}
+                min={1}
+                step={1}
+                value={draft.slaWarningDays}
+                disabled={controlsDisabled}
+                aria-invalid={!!validationError}
+                aria-describedby={validationError ? "sla-error" : undefined}
+                onChange={(e) => updateDraft("slaWarningDays", Number(e.target.value))}
               />
             </div>
             <div className="space-y-2">
@@ -87,30 +151,67 @@ function ConfigurationPage() {
               <Input
                 id="breach"
                 type="number"
-                value={breachDays}
-                onChange={(e) => setBreachDays(Number(e.target.value))}
+                min={1}
+                step={1}
+                value={draft.slaBreachDays}
+                disabled={controlsDisabled}
+                aria-invalid={!!validationError}
+                aria-describedby={validationError ? "sla-error" : undefined}
+                onChange={(e) => updateDraft("slaBreachDays", Number(e.target.value))}
               />
             </div>
           </div>
+          {validationError && (
+            <p id="sla-error" className="mt-2 text-xs text-destructive" role="alert">
+              {validationError}
+            </p>
+          )}
           <Separator className="my-5" />
           <p className="font-display text-base font-semibold">Automation</p>
           <div className="mt-3 space-y-4">
             {(
               [
                 ["autoSchedule", "Let the orchestrator auto-book the best slot"],
-                ["aiRisk", "Run AI risk analysis on every feedback submission"],
+                ["aiRiskAnalysis", "Run AI risk analysis on every feedback submission"],
                 ["teamsReminders", "Send Teams reminders to candidate and panel"],
                 ["weeklyDigest", "Email a weekly hiring digest to leadership"],
               ] as const
             ).map(([key, label]) => (
-              <div key={key} className="flex items-center justify-between gap-4">
-                <span className="text-sm">{label}</span>
-                <Switch
-                  checked={toggles[key]}
-                  onCheckedChange={(v) => setToggles((prev) => ({ ...prev, [key]: v }))}
-                />
+              <div key={key} className="space-y-1">
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-sm">{label}</span>
+                  <Switch
+                    aria-label={label}
+                    checked={draft[key]}
+                    disabled={controlsDisabled}
+                    onCheckedChange={(v) => updateDraft(key, v)}
+                  />
+                </div>
+                {key === "weeklyDigest" && (
+                  <p className="text-xs text-muted-foreground">
+                    Delivery is set up on the{" "}
+                    <Link to="/reports" className="underline underline-offset-2">
+                      Reports
+                    </Link>{" "}
+                    page.
+                  </p>
+                )}
               </div>
             ))}
+          </div>
+          <div className="mt-5 flex flex-wrap justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={resetDraft} disabled={!dirty || saving}>
+              Reset
+            </Button>
+            <Button
+              size="sm"
+              className="gap-2"
+              onClick={saveSettings}
+              disabled={!dirty || !!validationError || controlsDisabled}
+            >
+              {saving && <Loader2 className="size-4 animate-spin" />}
+              Save changes
+            </Button>
           </div>
         </Card>
 

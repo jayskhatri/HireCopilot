@@ -1,5 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { callResponses, type ResponsesTool } from "./ai.server";
+import { slaLevel, type SlaThresholds } from "./app-settings";
+import { getAppSettings } from "./app-settings.server";
 
 export type CopilotTurn = { role: "user" | "assistant"; content: string };
 
@@ -28,7 +30,12 @@ const tools: ResponsesTool[] = [
     parameters: {
       type: "object",
       additionalProperties: false,
-      properties: { days: { type: "number", description: "SLA threshold in days, e.g. 3" } },
+      properties: {
+        days: {
+          type: "number",
+          description: "SLA threshold in days. Defaults to the configured warning threshold.",
+        },
+      },
       required: ["days"],
     },
   },
@@ -53,7 +60,7 @@ function daysSince(iso: string) {
   return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
 }
 
-async function runTool(name: string, args: any) {
+async function runTool(name: string, args: any, settings: SlaThresholds) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
   if (name === "getCandidateStatus") {
@@ -80,12 +87,14 @@ async function runTool(name: string, args: any) {
         .eq("candidate_id", c.id)
         .order("created_at", { ascending: false })
         .limit(6);
+      const daysInStage = daysSince(c.status_updated_at);
       results.push({
         name: `${c.first_name} ${c.last_name}`,
         email: c.email,
         role: c.jobs?.title ?? "Unassigned",
         current_stage: c.current_stage,
-        days_in_stage: daysSince(c.status_updated_at),
+        days_in_stage: daysInStage,
+        sla_level: slaLevel(daysInStage, settings),
         experience_years: c.experience_years,
         skills: c.skills,
         interviews,
@@ -96,7 +105,11 @@ async function runTool(name: string, args: any) {
   }
 
   if (name === "getStuckCandidates") {
-    const days = Number(args?.days ?? 3);
+    const requested = Number(args?.days);
+    const days =
+      Number.isFinite(requested) && requested > 0
+        ? Math.min(requested, 365)
+        : settings.slaWarningDays;
     const cutoff = new Date(Date.now() - days * 86400000).toISOString();
     const { data } = await supabaseAdmin
       .from("candidates")
@@ -106,13 +119,19 @@ async function runTool(name: string, args: any) {
       .order("status_updated_at", { ascending: true });
     return {
       threshold_days: days,
+      warning_days: settings.slaWarningDays,
+      breach_days: settings.slaBreachDays,
       count: data?.length ?? 0,
-      candidates: (data as any[] | null)?.map((c) => ({
-        name: `${c.first_name} ${c.last_name}`,
-        stage: c.current_stage,
-        role: c.jobs?.title ?? "Unassigned",
-        days_in_stage: daysSince(c.status_updated_at),
-      })),
+      candidates: (data as any[] | null)?.map((c) => {
+        const daysInStage = daysSince(c.status_updated_at);
+        return {
+          name: `${c.first_name} ${c.last_name}`,
+          stage: c.current_stage,
+          role: c.jobs?.title ?? "Unassigned",
+          days_in_stage: daysInStage,
+          sla_level: slaLevel(daysInStage, settings),
+        };
+      }),
     };
   }
 
@@ -174,10 +193,12 @@ async function runTool(name: string, args: any) {
   return { error: `Unknown tool ${name}` };
 }
 
-const SYSTEM = `You are HireCopilot, an autonomous hiring operations assistant embedded in Microsoft Teams for a recruiting team.
+function buildSystemPrompt(s: SlaThresholds) {
+  return `You are HireCopilot, an autonomous hiring operations assistant embedded in Microsoft Teams for a recruiting team.
 Always call the available tools to read live data from the hiring database before answering — never invent candidates, stages, dates or counts.
 Answer like a senior recruiting ops partner: lead with the direct answer, then 2-5 short markdown bullets with the concrete facts (stage, days in stage, interviewer, next action).
-Flag SLA breaches (>3 days in stage) explicitly and always end with a recommended next action. Keep responses under 160 words.`;
+Flag candidates as **at risk** when they have been more than ${s.slaWarningDays} days in stage, and as an **SLA breach** when more than ${s.slaBreachDays} days. Always end with a recommended next action. Keep responses under 160 words.`;
+}
 
 export const askCopilot = createServerFn({ method: "POST" })
   .inputValidator((data: { messages: CopilotTurn[] }) => data)
@@ -191,10 +212,12 @@ export const askCopilot = createServerFn({ method: "POST" })
       );
 
     const toolsUsed: string[] = [];
+    const settings = await getAppSettings();
+    const instructions = buildSystemPrompt(settings);
 
     for (let step = 0; step < 5; step++) {
       const result = await callResponses({
-        instructions: SYSTEM,
+        instructions,
         input,
         tools,
         store: false,
@@ -220,7 +243,7 @@ export const askCopilot = createServerFn({ method: "POST" })
           parsed = {};
         }
         toolsUsed.push(call.name);
-        const output = await runTool(call.name, parsed);
+        const output = await runTool(call.name, parsed, settings);
         input.push({
           type: "function_call_output",
           call_id: call.call_id,

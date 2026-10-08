@@ -10,7 +10,7 @@ import { useState } from "react";
 
 const CHIPS = [
   "Where is Rahul Sharma's application?",
-  "Show candidates stuck for more than 3 days",
+  "Show candidates at risk of breaching SLA",
   "Which positions are blocked?",
   "What interviews are happening today?",
 ];

@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { callResponses } from "./ai.server";
+import { getAppSettings } from "./app-settings.server";
 
 export type RubricAnswer = { question: string; score: number };
 
@@ -43,10 +44,20 @@ function deterministic(input: FeedbackInput): FeedbackAnalysis {
   };
 }
 
+export type FeedbackAnalysisResult = FeedbackAnalysis & {
+  aiGenerated: boolean;
+  aiDisabled?: boolean;
+};
+
 export const analyzeFeedback = createServerFn({ method: "POST" })
   .inputValidator((data: FeedbackInput) => data)
-  .handler(async ({ data }): Promise<FeedbackAnalysis & { aiGenerated: boolean }> => {
+  .handler(async ({ data }): Promise<FeedbackAnalysisResult> => {
     const fallback = deterministic(data);
+
+    const { aiRiskAnalysis } = await getAppSettings();
+    if (!aiRiskAnalysis) {
+      return { ...fallback, aiGenerated: false, aiDisabled: true };
+    }
 
     const prompt = `Evaluate this interview feedback and return json.
 

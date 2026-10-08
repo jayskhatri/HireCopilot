@@ -4,28 +4,30 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useAppSettings } from "@/hooks/use-app-settings";
 import { supabase } from "@/integrations/supabase/client";
 import { configureGoogleDailyInterviewReport } from "@/lib/google-apps-script-report.functions";
 import {
-  candidatesQuery,
-  daysInStage,
-  formatDate,
-  fullName,
-  interviewsQuery,
-  jobsQuery,
-  slaLevel,
-  STAGE_LABEL,
-  type Candidate,
-  type Job,
+    candidatesQuery,
+    daysInStage,
+    formatDate,
+    fullName,
+    interviewsQuery,
+    isSlaAtRisk,
+    jobsQuery,
+    slaLevel,
+    STAGE_LABEL,
+    type Candidate,
+    type Job,
 } from "@/lib/hiring";
 import { normalizeReportRecipients } from "@/lib/report-recipients";
 import { useQuery } from "@tanstack/react-query";
@@ -34,14 +36,14 @@ import { AlertTriangle, BriefcaseBusiness, CalendarClock, Download, Eye, X } fro
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
-  clearOpenPositionReportSchedule,
-  downloadOpenPositionsCsv,
-  nextReportScheduleRun,
-  OPEN_POSITION_SCHEDULE_UPDATED_EVENT,
-  readOpenPositionReportSchedule,
-  WEEKDAYS,
-  writeOpenPositionReportSchedule,
-  type ReportSchedule,
+    clearOpenPositionReportSchedule,
+    downloadOpenPositionsCsv,
+    nextReportScheduleRun,
+    OPEN_POSITION_SCHEDULE_UPDATED_EVENT,
+    readOpenPositionReportSchedule,
+    WEEKDAYS,
+    writeOpenPositionReportSchedule,
+    type ReportSchedule,
 } from "../lib/open-position-report";
 
 const EMPTY_CANDIDATES: Candidate[] = [];
@@ -72,6 +74,7 @@ function ReportsPage() {
   const candidates = useQuery(candidatesQuery);
   const interviews = useQuery(interviewsQuery);
   const jobs = useQuery(jobsQuery);
+  const { settings } = useAppSettings();
   const [reportOpen, setReportOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [schedule, setSchedule] = useState<ReportSchedule | null>(null);
@@ -89,9 +92,7 @@ function ReportsPage() {
   const [openReportStatusMessage, setOpenReportStatusMessage] = useState("");
   const list = candidates.data ?? EMPTY_CANDIDATES;
   const openPositions = (jobs.data ?? EMPTY_JOBS).filter((job) => job.status === "OPEN");
-  const stuck = list.filter(
-    (c) => !["OFFER", "REJECTED"].includes(c.current_stage) && slaLevel(daysInStage(c)) !== "ok",
-  );
+  const stuck = list.filter((c) => isSlaAtRisk(c, settings));
 
   useEffect(() => {
     const syncSchedule = () => {
@@ -193,7 +194,7 @@ function ReportsPage() {
         c.jobs?.title ?? "",
         STAGE_LABEL[c.current_stage],
         String(daysInStage(c)),
-        slaLevel(daysInStage(c)),
+        slaLevel(daysInStage(c), settings),
       ]),
     ];
     const csv = rows
@@ -333,6 +334,8 @@ function ReportsPage() {
       setFrequency(schedule.frequency);
       setDayOfWeek(schedule.dayOfWeek);
       setTime(schedule.time);
+    } else if (settings.weeklyDigest) {
+      setFrequency("weekly");
     }
     setScheduleOpen(true);
   }
@@ -353,6 +356,9 @@ function ReportsPage() {
             </div>
             <div className="min-w-0">
               <p className="font-display text-base font-semibold">Open positions report</p>
+              <Badge variant="outline" className="mt-1 text-[11px]">
+                Leadership weekly digest: {settings.weeklyDigest ? "On" : "Off"} (Configuration)
+              </Badge>
               <p className="mt-1 text-sm text-muted-foreground">
                 Current openings, departments, locations, required skills and assigned candidate
                 counts.
@@ -444,7 +450,9 @@ function ReportsPage() {
                 </div>
                 <Badge
                   className="shrink-0"
-                  variant={slaLevel(daysInStage(c)) === "breach" ? "destructive" : "secondary"}
+                  variant={
+                    slaLevel(daysInStage(c), settings) === "breach" ? "destructive" : "secondary"
+                  }
                 >
                   {daysInStage(c)} days
                 </Badge>

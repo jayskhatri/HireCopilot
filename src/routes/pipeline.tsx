@@ -4,31 +4,32 @@ import { FeedbackOutcomeDialog, type FeedbackOutcome } from "@/components/feedba
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { useAppSettings } from "@/hooks/use-app-settings";
 import {
-  candidatesQuery,
-  daysInStage,
-  derivePipelineCardState,
-  feedbackQuery,
-  fullName,
-  initials,
-  interviewsQuery,
-  positionLabel,
-  resolveFeedbackInterviewPosition,
-  slaLevel,
-  STAGE_LABEL,
-  STAGES,
-  type PipelineIndicatorIcon,
-  type PipelineIndicatorTone,
+    candidatesQuery,
+    daysInStage,
+    derivePipelineCardState,
+    feedbackQuery,
+    fullName,
+    initials,
+    interviewsQuery,
+    positionLabel,
+    resolveFeedbackInterviewPosition,
+    slaLevel,
+    STAGE_LABEL,
+    STAGES,
+    type PipelineIndicatorIcon,
+    type PipelineIndicatorTone,
 } from "@/lib/hiring";
 import { cn } from "@/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
-  AlertTriangle,
-  CalendarPlus,
-  CheckCircle2,
-  MessageSquarePlus,
-  type LucideIcon,
+    AlertTriangle,
+    CalendarPlus,
+    CheckCircle2,
+    MessageSquarePlus,
+    type LucideIcon,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
@@ -95,6 +96,7 @@ function PipelinePage() {
   const candidates = useQuery(candidatesQuery);
   const interviews = useQuery(interviewsQuery);
   const feedback = useQuery(feedbackQuery);
+  const { settings } = useAppSettings();
   const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null);
   const [outcome, setOutcome] = useState<FeedbackOutcome | null>(null);
   const [now, setNow] = useState(() => new Date());
@@ -127,7 +129,7 @@ function PipelinePage() {
                 <div className="space-y-3">
                   {column.map((c) => {
                     const days = daysInStage(c);
-                    const level = slaLevel(days);
+                    const level = slaLevel(days, settings);
                     const card = derivePipelineCardState({
                       candidate: c,
                       interviews: interviews.data ?? [],

@@ -1,7 +1,7 @@
 import { AppShell } from "@/components/app-shell";
 import {
-  CancelInterviewDialog,
-  type CancelInterviewTarget,
+    CancelInterviewDialog,
+    type CancelInterviewTarget,
 } from "@/components/cancel-interview-dialog";
 import { CandidatePicker } from "@/components/orchestrator/candidate-picker";
 import { RoundStepper } from "@/components/orchestrator/round-stepper";
@@ -14,25 +14,26 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { useAppSettings } from "@/hooks/use-app-settings";
 import {
-  BUSINESS_HOURS_END,
-  BUSINESS_HOURS_START,
-  candidatesQuery,
-  formatDate,
-  formatTime,
-  fullName,
-  initials,
-  interviewersQuery,
-  interviewsQuery,
-  isSlotBookable,
-  isWeekday,
-  jobLabel,
-  logActivity,
-  resolveRoundBookingState,
-  resolveRoundProgression,
-  SLOT_LEAD_BUFFER_MINUTES,
-  STAGE_LABEL,
-  type Round,
+    BUSINESS_HOURS_END,
+    BUSINESS_HOURS_START,
+    candidatesQuery,
+    formatDate,
+    formatTime,
+    fullName,
+    initials,
+    interviewersQuery,
+    interviewsQuery,
+    isSlotBookable,
+    isWeekday,
+    jobLabel,
+    logActivity,
+    resolveRoundBookingState,
+    resolveRoundProgression,
+    SLOT_LEAD_BUFFER_MINUTES,
+    STAGE_LABEL,
+    type Round,
 } from "@/lib/hiring";
 import { findInterviewerConflict, findSchedulingConflicts } from "@/lib/scheduling-conflicts";
 import { bookInterview, rescheduleInterview } from "@/lib/scheduling.functions";
@@ -41,16 +42,16 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import {
-  BellRing,
-  CalendarCheck,
-  CalendarClock,
-  CheckCircle2,
-  Clock,
-  Loader2,
-  MapPin,
-  Sparkles,
-  Users,
-  Video,
+    BellRing,
+    CalendarCheck,
+    CalendarClock,
+    CheckCircle2,
+    Clock,
+    Loader2,
+    MapPin,
+    Sparkles,
+    Users,
+    Video,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -157,6 +158,9 @@ function OrchestratorPage() {
   const candidates = useQuery(candidatesQuery);
   const interviewers = useQuery(interviewersQuery);
   const interviews = useQuery(interviewsQuery);
+  const { settings, query: settingsQuery } = useAppSettings();
+  // No auto preselection until settings resolve; on error the defaults apply.
+  const autoSchedule = settingsQuery.isPending ? false : settings.autoSchedule;
 
   // Stays null through SSR and first paint so slot times never render against the server clock.
   const [now, setNow] = useState<Date | null>(null);
@@ -180,11 +184,12 @@ function OrchestratorPage() {
   }, [now]);
 
   const slots = useMemo(() => (now ? nextSlots(now) : []), [now]);
+  const defaultSlotId = autoSchedule ? (slots[0]?.id ?? "") : "";
   const [step, setStep] = useState(0);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | undefined>(candidateId);
   const selectedCandidateIdRef = useRef(selectedCandidateId);
   selectedCandidateIdRef.current = selectedCandidateId;
-  const [slotId, setSlotId] = useState(slots[0]?.id ?? "");
+  const [slotId, setSlotId] = useState(defaultSlotId);
   const [panel, setPanel] = useState<string[]>([]);
   const [selectedRound, setSelectedRound] = useState<Round | undefined>(undefined);
   const [booking, setBooking] = useState(false);
@@ -252,11 +257,15 @@ function OrchestratorPage() {
     !selectedCandidateRejected &&
     !selectedCandidateOffered &&
     interviewsLoaded;
-  const slot: SlotOption | undefined = slots.find((s) => s.id === slotId) ?? slots[0];
+  const slot: SlotOption | undefined =
+    slots.find((s) => s.id === slotId) ?? (autoSchedule ? slots[0] : undefined);
 
   useEffect(() => {
-    setSlotId((prev) => (slots.some((s) => s.id === prev) ? prev : (slots[0]?.id ?? "")));
-  }, [slots]);
+    // Wait for settings so auto-schedule off never inherits a default preselection.
+    if (settingsQuery.isPending) return;
+    setSlotId((prev) => (slots.some((s) => s.id === prev) ? prev : defaultSlotId));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slots, settingsQuery.isPending]);
 
   const manualMode: "A" | "B" | "C" = !manualExpanded || !manualDate ? "A" : manualTime ? "C" : "B";
 
@@ -286,11 +295,19 @@ function OrchestratorPage() {
     if (manualMode === "B") {
       return (
         manualSuggestedTimes.find((s) => s.id === manualSuggestedSlotId) ??
-        manualSuggestedTimes.find((s) => s.best)
+        (autoSchedule ? manualSuggestedTimes.find((s) => s.best) : undefined)
       );
     }
     return slot;
-  }, [manualMode, manualDate, manualTime, manualSuggestedTimes, manualSuggestedSlotId, slot]);
+  }, [
+    manualMode,
+    manualDate,
+    manualTime,
+    manualSuggestedTimes,
+    manualSuggestedSlotId,
+    slot,
+    autoSchedule,
+  ]);
 
   const manualTimeError = useMemo<string | null>(() => {
     if (manualMode !== "C" || !manualDate || !manualTime) return null;
@@ -310,7 +327,7 @@ function OrchestratorPage() {
 
   function resetWizard() {
     setSelectedRound(undefined);
-    setSlotId(slots[0]?.id ?? "");
+    setSlotId(defaultSlotId);
     setPanel([]);
     setBooked(false);
     setRemindersSent(false);
@@ -333,7 +350,7 @@ function OrchestratorPage() {
 
   function handleRoundChange(round: Round) {
     setSelectedRound(round);
-    setSlotId(slots[0]?.id ?? "");
+    setSlotId(defaultSlotId);
     setPanel([]);
     setBooked(false);
     setRemindersSent(false);
@@ -423,7 +440,7 @@ function OrchestratorPage() {
     .filter((r) => r.availability.state === "available")
     .slice(0, 1)
     .map((r) => r.id);
-  const chosenPanel = panel.length ? panel : bestPanel;
+  const chosenPanel = panel.length || !autoSchedule ? panel : bestPanel;
   const panelTimezones = [
     ...new Set(
       ranked
@@ -478,7 +495,9 @@ function OrchestratorPage() {
       : manualTimeError
         ? manualTimeError
         : !chosenPanel.length
-          ? "No interviewer is free for this slot — choose another time."
+          ? autoSchedule
+            ? "No interviewer is free for this slot — choose another time."
+            : "Select at least one interviewer for the panel."
           : busyPanelMembers.length
             ? "A selected interviewer is busy at this time."
             : chosenPanel.some((id) => availabilityByInterviewer[id]?.state !== "available")
@@ -538,6 +557,7 @@ function OrchestratorPage() {
   }
 
   async function sendReminders() {
+    if (!settings.teamsReminders) return;
     if (!candidate || !activeRound) return;
     await logActivity(candidate.id, "REMINDERS_SENT", {
       channels: ["Microsoft Teams", "Email"],
@@ -960,7 +980,7 @@ function OrchestratorPage() {
                             aria-label={`${i.name}${busyLabel ? ` — ${busyLabel}` : ""}`}
                             onCheckedChange={(value) =>
                               setPanel((prev) => {
-                                const base = prev.length ? prev : bestPanel;
+                                const base = prev.length || !autoSchedule ? prev : bestPanel;
                                 return value
                                   ? [...new Set([...base, i.id])]
                                   : base.filter((p) => p !== i.id);
@@ -1048,14 +1068,26 @@ function OrchestratorPage() {
                 { icon: CalendarCheck, label: "Send calendar invites" },
                 { icon: BellRing, label: "Send reminders" },
                 { icon: Clock, label: "Follow up" },
-              ].map((s) => (
-                <div key={s.label} className="flex items-center gap-2">
-                  <s.icon
-                    className={cn("size-4", booked ? "text-success" : "text-muted-foreground")}
-                  />
-                  {s.label}
-                </div>
-              ))}
+              ].map((s) => {
+                const remindersOff = s.label === "Send reminders" && !settings.teamsReminders;
+                return (
+                  <div
+                    key={s.label}
+                    className={cn(
+                      "flex items-center gap-2",
+                      remindersOff && "line-through opacity-60",
+                    )}
+                  >
+                    <s.icon
+                      className={cn(
+                        "size-4",
+                        booked && !remindersOff ? "text-success" : "text-muted-foreground",
+                      )}
+                    />
+                    {s.label}
+                  </div>
+                );
+              })}
               {!step1Complete && (
                 <p className="basis-full text-xs text-muted-foreground">
                   Choose a candidate and round to continue
@@ -1078,12 +1110,21 @@ function OrchestratorPage() {
                 <Button
                   variant="outline"
                   onClick={sendReminders}
-                  disabled={!step1Complete || !booked || remindersSent}
+                  disabled={!settings.teamsReminders || !step1Complete || !booked || remindersSent}
                 >
                   <BellRing className="mr-2 size-4" />{" "}
                   {remindersSent ? "Reminders sent" : "Send reminders"}
                 </Button>
               </div>
+              {!settings.teamsReminders && (
+                <p className="text-xs text-muted-foreground">
+                  Teams reminders are turned off in{" "}
+                  <Link to="/configuration" className="underline underline-offset-2">
+                    Configuration
+                  </Link>
+                  .
+                </p>
+              )}
               {!booked && confirmBlockedReason && (
                 <p className="text-xs text-muted-foreground">{confirmBlockedReason}</p>
               )}

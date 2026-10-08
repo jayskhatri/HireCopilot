@@ -21,8 +21,19 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { supabase } from "@/integrations/supabase/client";
-import { departmentsQuery, jobLabel, type Job, type PositionStatus } from "@/lib/hiring";
+import {
+  csvImportErrorReport,
+  departmentsQuery,
+  jobLabel,
+  previewPositionCsv,
+  type CsvImportIssue,
+  type CsvImportPreview,
+  type Job,
+  type PositionImportRow,
+  type PositionStatus,
+} from "@/lib/hiring";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Download, Upload } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -231,6 +242,218 @@ export function PositionFormDialog({
           </Button>
           <Button onClick={save} disabled={saving}>
             {saving ? "Saving..." : job ? "Save changes" : "Open position"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export function PositionCsvImportDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const departments = useQuery(departmentsQuery);
+  const queryClient = useQueryClient();
+  const [preview, setPreview] = useState<CsvImportPreview<PositionImportRow> | null>(null);
+  const [serverIssues, setServerIssues] = useState<CsvImportIssue[]>([]);
+  const [fileName, setFileName] = useState("");
+  const [importing, setImporting] = useState(false);
+  const issues = [...(preview?.issues ?? []), ...serverIssues];
+
+  function reset() {
+    setPreview(null);
+    setServerIssues([]);
+    setFileName("");
+  }
+
+  async function readFile(file: File) {
+    setFileName(file.name);
+    setServerIssues([]);
+    setPreview(previewPositionCsv(await file.text(), departments.data ?? []));
+  }
+
+  function downloadErrors() {
+    const blob = new Blob([csvImportErrorReport(issues)], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "position-import-errors.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function importRows() {
+    if (!preview || issues.length || !preview.rows.length) return;
+    setImporting(true);
+    setServerIssues([]);
+    try {
+      const { data, error } = await supabase.rpc("import_positions", {
+        import_rows: preview.rows.map(({ value }) => value),
+      });
+      if (error) throw error;
+      await invalidatePositionQueries(queryClient);
+      toast.success(`${data ?? preview.rows.length} positions imported`);
+      reset();
+      onOpenChange(false);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Could not import positions";
+      const rowError = message.match(/row\s+(\d+)\s+field\s+([a-z_]+):\s*(.+)/i);
+      const [, rowNumber = "", field = "", detail = ""] = rowError ?? [];
+      setServerIssues([
+        rowNumber && field && detail
+          ? { row: Number(rowNumber) + 1, field, message: detail }
+          : { row: null, field: "Import", message },
+      ]);
+      toast.error("Position import failed; no rows were saved");
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  const issuesByRow = new Map<number, CsvImportIssue[]>();
+  issues.forEach((issue) => {
+    if (issue.row === null) return;
+    issuesByRow.set(issue.row, [...(issuesByRow.get(issue.row) ?? []), issue]);
+  });
+  const invalidPreviewRows = preview?.rows.filter(({ row }) => issuesByRow.has(row)).length ?? 0;
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && importing) return;
+        if (!nextOpen) reset();
+        onOpenChange(nextOpen);
+      }}
+    >
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
+        <DialogHeader>
+          <DialogTitle>Import positions from CSV</DialogTitle>
+          <DialogDescription>
+            Upload up to 100 positions. These exact headers are required in any order: title,
+            department, description, location, required_skills, status. Skill values use semicolons.
+            Department must match an existing department name.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <Input
+            type="file"
+            accept=".csv,text/csv"
+            aria-label="Choose positions CSV"
+            disabled={importing || departments.isLoading || departments.isError}
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0];
+              event.currentTarget.value = "";
+              if (file) void readFile(file);
+            }}
+            className="max-w-md"
+          />
+          {fileName && <span className="text-sm text-muted-foreground">{fileName}</span>}
+          {departments.isError && (
+            <p className="text-sm text-destructive">Could not load departments for validation.</p>
+          )}
+        </div>
+
+        {preview && (
+          <>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-muted-foreground">
+                {preview.rows.length} rows · {preview.rows.length - invalidPreviewRows} valid ·{" "}
+                {issues.length} errors
+              </p>
+              {issues.length > 0 && (
+                <Button variant="outline" size="sm" className="gap-2" onClick={downloadErrors}>
+                  <Download className="size-4" /> Download error report
+                </Button>
+              )}
+            </div>
+            {issues
+              .filter(
+                (issue) =>
+                  issue.row === null ||
+                  !preview.rows.some((previewRow) => previewRow.row === issue.row),
+              )
+              .map((issue, index) => (
+                <p key={`${issue.field}-${index}`} className="text-sm text-destructive">
+                  {issue.field}: {issue.message}
+                </p>
+              ))}
+            <div className="max-h-[48vh] overflow-auto rounded-md border border-border">
+              <table className="w-full min-w-[850px] text-left text-xs">
+                <thead className="sticky top-0 bg-muted text-muted-foreground">
+                  <tr>
+                    {[
+                      "Row",
+                      "Title",
+                      "Department",
+                      "Description",
+                      "Location",
+                      "Required skills",
+                      "Status",
+                      "Validation",
+                    ].map((heading) => (
+                      <th key={heading} className="px-2 py-2 font-medium">
+                        {heading}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {preview.rows.map(({ row, value }) => {
+                    const rowIssues = issuesByRow.get(row) ?? [];
+                    return (
+                      <tr key={row} className={rowIssues.length ? "bg-destructive/5" : ""}>
+                        <td className="px-2 py-2">{row}</td>
+                        <td className="px-2 py-2">{value.title}</td>
+                        <td className="px-2 py-2">{value.department}</td>
+                        <td className="max-w-64 truncate px-2 py-2">{value.description ?? "—"}</td>
+                        <td className="px-2 py-2">{value.location}</td>
+                        <td className="px-2 py-2">{value.required_skills.join("; ") || "—"}</td>
+                        <td className="px-2 py-2">{value.status}</td>
+                        <td className="min-w-56 px-2 py-2 text-destructive">
+                          {rowIssues.map((issue, index) => (
+                            <p key={`${issue.field}-${index}`}>
+                              {issue.field}: {issue.message}
+                            </p>
+                          ))}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {!preview.rows.length && (
+                    <tr>
+                      <td colSpan={8} className="px-3 py-5 text-center text-muted-foreground">
+                        No data rows to preview.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={importing}>
+            Cancel
+          </Button>
+          <Button
+            onClick={importRows}
+            disabled={
+              !preview ||
+              !preview.rows.length ||
+              issues.length > 0 ||
+              importing ||
+              departments.isError
+            }
+          >
+            <Upload className="mr-2 size-4" />{" "}
+            {importing ? "Importing…" : `Import ${preview?.rows.length ?? 0} positions`}
           </Button>
         </DialogFooter>
       </DialogContent>

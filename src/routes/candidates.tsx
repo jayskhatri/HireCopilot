@@ -4,7 +4,11 @@ import {
   type CancelInterviewTarget,
 } from "@/components/cancel-interview-dialog";
 import { CandidateFiltersSheet } from "@/components/candidate-filters-sheet";
-import { CandidateFormDialog, DeleteCandidateDialog } from "@/components/candidate-form-dialog";
+import {
+  CandidateCsvImportDialog,
+  CandidateFormDialog,
+  DeleteCandidateDialog,
+} from "@/components/candidate-form-dialog";
 import { FeedbackModal, type FeedbackTarget } from "@/components/feedback-modal";
 import { RejectCandidateDialog } from "@/components/reject-candidate-dialog";
 import { ResponsiveDetailPanel } from "@/components/responsive-detail-panel";
@@ -16,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UnrejectCandidateDialog } from "@/components/unreject-candidate-dialog";
+import { useAppSettings } from "@/hooks/use-app-settings";
 import {
   activityQuery,
   candidatesQuery,
@@ -29,6 +34,7 @@ import {
   groupCandidateInterviews,
   initials,
   interviewsQuery,
+  isSlaAtRisk,
   jobLabel,
   matchesCandidateAdvancedFilters,
   positionLabel,
@@ -57,6 +63,7 @@ import {
   Search,
   StickyNote,
   Trash2,
+  Upload,
   UserPlus,
   X,
 } from "lucide-react";
@@ -172,6 +179,7 @@ function StageBadge({ stage }: { stage: string }) {
 function CandidatesPage() {
   const candidates = useQuery(candidatesQuery);
   const interviews = useQuery(interviewsQuery);
+  const { settings } = useAppSettings();
   const [search, setSearch] = useState("");
   const [stage, setStage] = useState<string>("ALL");
   const [tab, setTab] = useState("all");
@@ -179,6 +187,7 @@ function CandidatesPage() {
   const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null);
   const [cancelTarget, setCancelTarget] = useState<CancelInterviewTarget | null>(null);
   const [formOpen, setFormOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [editing, setEditing] = useState<Candidate | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Candidate | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -190,7 +199,10 @@ function CandidatesPage() {
   const activity = useQuery(activityQuery(selected?.id ?? null));
 
   const list = useMemo(() => candidates.data ?? [], [candidates.data]);
-  const advancedOptions = useMemo(() => deriveCandidateAdvancedFilterOptions(list), [list]);
+  const advancedOptions = useMemo(
+    () => deriveCandidateAdvancedFilterOptions(list, settings),
+    [list, settings],
+  );
   const advancedFilterCount = countActiveCandidateAdvancedFilters(advancedFilters);
   const draftFilterErrors = validateCandidateAdvancedFilters(draftFilters);
   const filtered = useMemo(() => {
@@ -205,13 +217,13 @@ function CandidatesPage() {
       } else if (c.current_stage === "REJECTED") {
         return false;
       }
-      if (tab === "risk" && daysInStage(c) <= 3) return false;
+      if (tab === "risk" && slaLevel(daysInStage(c), settings) === "ok") return false;
       if (tab === "recent" && daysInStage(c) > 2) return false;
       if (tab === "offers" && c.current_stage !== "OFFER") return false;
-      return matchesCandidateAdvancedFilters(c, advancedFilters, now);
+      return matchesCandidateAdvancedFilters(c, advancedFilters, now, settings);
     });
     return sortCandidates(matches, advancedFilters.sort);
-  }, [advancedFilters, list, search, stage, tab]);
+  }, [advancedFilters, list, search, settings, stage, tab]);
 
   useEffect(() => {
     setSelectedIds(new Set());
@@ -255,10 +267,8 @@ function CandidatesPage() {
     },
     {
       label: "SLA breaches",
-      value: list.filter(
-        (c) => !["OFFER", "REJECTED"].includes(c.current_stage) && daysInStage(c) > 3,
-      ).length,
-      sub: "> 3 days in stage",
+      value: list.filter((c) => isSlaAtRisk(c, settings)).length,
+      sub: `> ${settings.slaWarningDays} days in stage`,
     },
     {
       label: "Rejected",
@@ -329,6 +339,14 @@ function CandidatesPage() {
               )}
             </Button>
             <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={() => setImportOpen(true)}
+            >
+              <Upload className="size-4" /> Import CSV
+            </Button>
+            <Button
               size="sm"
               className="gap-2"
               onClick={() => {
@@ -382,7 +400,7 @@ function CandidatesPage() {
               <tbody className="divide-y divide-border">
                 {filtered.map((c) => {
                   const days = daysInStage(c);
-                  const level = slaLevel(days);
+                  const level = slaLevel(days, settings);
                   return (
                     <tr
                       key={c.id}
@@ -564,7 +582,9 @@ function CandidatesPage() {
                 <span
                   className={cn(
                     "text-sm font-medium",
-                    daysInStage(selected) > 3 ? "text-destructive" : "text-muted-foreground",
+                    slaLevel(daysInStage(selected), settings) !== "ok"
+                      ? "text-destructive"
+                      : "text-muted-foreground",
                   )}
                 >
                   {daysInStage(selected)} days in stage
@@ -694,17 +714,21 @@ function CandidatesPage() {
                 Documents
               </p>
               <div className="mt-2 space-y-2 text-sm">
-                {["Resume.pdf", "Cover Letter.pdf"].map((doc) => (
-                  <div
-                    key={doc}
-                    className="flex items-center justify-between rounded-lg border border-border px-3 py-2"
+                {selected.resume_url ? (
+                  <a
+                    href={selected.resume_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-primary hover:bg-muted/40"
                   >
-                    <span className="flex items-center gap-2">
-                      <FileText className="size-4 text-muted-foreground" /> {doc}
-                    </span>
-                    <Download className="size-4 text-muted-foreground" />
-                  </div>
-                ))}
+                    <FileText className="size-4" /> Open resume
+                    <Download className="ml-auto size-4" />
+                  </a>
+                ) : (
+                  <p className="rounded-lg border border-dashed border-border px-3 py-2 text-muted-foreground">
+                    No resume link provided.
+                  </p>
+                )}
               </div>
 
               <p className="mt-4 text-xs uppercase tracking-wide text-muted-foreground">Activity</p>
@@ -762,6 +786,7 @@ function CandidatesPage() {
       />
       <FeedbackModal target={feedbackTarget} onOpenChange={(o) => !o && setFeedbackTarget(null)} />
       <CandidateFormDialog open={formOpen} onOpenChange={setFormOpen} candidate={editing} />
+      <CandidateCsvImportDialog open={importOpen} onOpenChange={setImportOpen} />
       <DeleteCandidateDialog
         candidate={deleteTarget}
         onOpenChange={(o) => !o && setDeleteTarget(null)}

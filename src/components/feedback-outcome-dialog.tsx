@@ -9,7 +9,7 @@ import {
     DialogHeader,
     DialogTitle,
 } from "@/components/ui/dialog";
-import type { FeedbackAnalysis } from "@/lib/feedback.functions";
+import type { FeedbackAnalysisResult } from "@/lib/feedback.functions";
 import { nextStageAfter, STAGE_LABEL } from "@/lib/hiring";
 import { Link } from "@tanstack/react-router";
 import { AlertTriangle, CheckCircle2, Sparkles } from "lucide-react";
@@ -18,7 +18,7 @@ export type FeedbackOutcome = {
   candidateId: string;
   candidateName: string;
   round: string;
-  analysis: FeedbackAnalysis & { aiGenerated: boolean };
+  analysis: FeedbackAnalysisResult;
 };
 
 type OutcomeVariant = {
@@ -120,7 +120,7 @@ export function FeedbackOutcomeDialog({
                 <Sparkles className="size-4 text-primary" /> AI risk analysis
                 {!analysis.aiGenerated && (
                   <Badge variant="outline" className="text-[10px]">
-                    offline scoring
+                    {analysis.aiDisabled ? "rules-based" : "offline scoring"}
                   </Badge>
                 )}
               </p>
@@ -148,7 +148,9 @@ export function FeedbackOutcomeDialog({
 
             {!analysis.aiGenerated && (
               <p className="text-xs text-muted-foreground">
-                Scored locally — AI analysis was unavailable.
+                {analysis.aiDisabled
+                  ? "Scored by rubric rules — AI risk analysis is turned off in Configuration."
+                  : "Scored locally — AI analysis was unavailable."}
               </p>
             )}
 

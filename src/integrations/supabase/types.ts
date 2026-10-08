@@ -8,6 +8,39 @@ export type Database = {
   };
   public: {
     Tables: {
+      app_settings: {
+        Row: {
+          ai_risk_analysis: boolean;
+          auto_schedule: boolean;
+          id: number;
+          sla_breach_days: number;
+          sla_warning_days: number;
+          teams_reminders: boolean;
+          updated_at: string;
+          weekly_digest: boolean;
+        };
+        Insert: {
+          ai_risk_analysis?: boolean;
+          auto_schedule?: boolean;
+          id?: number;
+          sla_breach_days?: number;
+          sla_warning_days?: number;
+          teams_reminders?: boolean;
+          updated_at?: string;
+          weekly_digest?: boolean;
+        };
+        Update: {
+          ai_risk_analysis?: boolean;
+          auto_schedule?: boolean;
+          id?: number;
+          sla_breach_days?: number;
+          sla_warning_days?: number;
+          teams_reminders?: boolean;
+          updated_at?: string;
+          weekly_digest?: boolean;
+        };
+        Relationships: [];
+      };
       candidate_activity_log: {
         Row: {
           action_type: string;
@@ -51,6 +84,7 @@ export type Database = {
           job_id: string | null;
           last_name: string;
           phone: string | null;
+          resume_url: string | null;
           rejection_reason: string | null;
           skills: string[];
           source: string;
@@ -66,6 +100,7 @@ export type Database = {
           job_id?: string | null;
           last_name: string;
           phone?: string | null;
+          resume_url?: string | null;
           rejection_reason?: string | null;
           skills?: string[];
           source?: string;
@@ -81,6 +116,7 @@ export type Database = {
           job_id?: string | null;
           last_name?: string;
           phone?: string | null;
+          resume_url?: string | null;
           rejection_reason?: string | null;
           skills?: string[];
           source?: string;
@@ -310,6 +346,14 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      import_candidates: {
+        Args: { import_rows: Json };
+        Returns: number;
+      };
+      import_positions: {
+        Args: { import_rows: Json };
+        Returns: number;
+      };
       create_job_with_code: {
         Args: {
           title: string;

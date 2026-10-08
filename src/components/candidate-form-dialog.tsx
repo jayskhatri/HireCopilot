@@ -1,35 +1,42 @@
 import {
-    AlertDialog,
-    AlertDialogAction,
-    AlertDialogCancel,
-    AlertDialogContent,
-    AlertDialogDescription,
-    AlertDialogFooter,
-    AlertDialogHeader,
-    AlertDialogTitle,
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
-    Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { supabase } from "@/integrations/supabase/client";
 import {
-    fullName,
-    jobLabel,
-    jobsQuery,
-    logActivity,
-    STAGE_LABEL,
-    STAGES,
-    type Candidate,
+  candidatesQuery,
+  csvImportErrorReport,
+  fullName,
+  jobLabel,
+  jobsQuery,
+  logActivity,
+  previewCandidateCsv,
+  STAGE_LABEL,
+  STAGES,
+  type Candidate,
+  type CandidateImportRow,
+  type CsvImportIssue,
+  type CsvImportPreview,
 } from "@/lib/hiring";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Download, Upload } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -310,6 +317,240 @@ export function CandidateFormDialog({
           </Button>
           <Button onClick={save} disabled={saving}>
             {saving ? "Saving…" : candidate ? "Save changes" : "Add candidate"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export function CandidateCsvImportDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const jobs = useQuery(jobsQuery);
+  const candidates = useQuery(candidatesQuery);
+  const queryClient = useQueryClient();
+  const [preview, setPreview] = useState<CsvImportPreview<CandidateImportRow> | null>(null);
+  const [serverIssues, setServerIssues] = useState<CsvImportIssue[]>([]);
+  const [fileName, setFileName] = useState("");
+  const [importing, setImporting] = useState(false);
+  const issues = [...(preview?.issues ?? []), ...serverIssues];
+
+  function reset() {
+    setPreview(null);
+    setServerIssues([]);
+    setFileName("");
+  }
+
+  async function readFile(file: File) {
+    setFileName(file.name);
+    setServerIssues([]);
+    const content = await file.text();
+    setPreview(previewCandidateCsv(content, jobs.data ?? [], candidates.data ?? []));
+  }
+
+  function downloadErrors() {
+    const blob = new Blob([csvImportErrorReport(issues)], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "candidate-import-errors.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function importRows() {
+    if (!preview || issues.length || !preview.rows.length) return;
+    setImporting(true);
+    setServerIssues([]);
+    try {
+      const { data, error } = await supabase.rpc("import_candidates", {
+        import_rows: preview.rows.map(({ value }) => value),
+      });
+      if (error) throw error;
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["candidates"] }),
+        queryClient.invalidateQueries({ queryKey: ["activity"] }),
+      ]);
+      toast.success(`${data ?? preview.rows.length} candidates imported`);
+      reset();
+      onOpenChange(false);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Could not import candidates";
+      const rowError = message.match(/row\s+(\d+)\s+field\s+([a-z_]+):\s*(.+)/i);
+      const rowNumber = rowError?.[1];
+      const field = rowError?.[2];
+      const detail = rowError?.[3];
+      setServerIssues([
+        rowNumber && field && detail
+          ? {
+              row: Number(rowNumber) + 1,
+              field,
+              message: detail,
+            }
+          : { row: null, field: "Import", message },
+      ]);
+      toast.error("Candidate import failed; no rows were saved");
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  const issuesByRow = new Map<number, CsvImportIssue[]>();
+  issues.forEach((issue) => {
+    if (issue.row === null) return;
+    issuesByRow.set(issue.row, [...(issuesByRow.get(issue.row) ?? []), issue]);
+  });
+  const invalidPreviewRows = preview?.rows.filter(({ row }) => issuesByRow.has(row)).length ?? 0;
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && importing) return;
+        if (!nextOpen) reset();
+        onOpenChange(nextOpen);
+      }}
+    >
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-6xl">
+        <DialogHeader>
+          <DialogTitle>Import candidates from CSV</DialogTitle>
+          <DialogDescription>
+            Upload up to 100 candidates. These exact headers are required in any order: first_name,
+            last_name, email, phone, job_code, source, experience_years, skills, current_stage,
+            resume_url. Skills use semicolons.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <Input
+            type="file"
+            accept=".csv,text/csv"
+            aria-label="Choose candidate CSV"
+            disabled={importing || jobs.isLoading || candidates.isLoading}
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0];
+              event.currentTarget.value = "";
+              if (file) void readFile(file);
+            }}
+            className="max-w-md"
+          />
+          {fileName && <span className="text-sm text-muted-foreground">{fileName}</span>}
+          {(jobs.isError || candidates.isError) && (
+            <p className="text-sm text-destructive">
+              Could not load jobs and candidates for validation.
+            </p>
+          )}
+        </div>
+
+        {preview && (
+          <>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-muted-foreground">
+                {preview.rows.length} rows · {preview.rows.length - invalidPreviewRows} valid ·{" "}
+                {issues.length} errors
+              </p>
+              {issues.length > 0 && (
+                <Button variant="outline" size="sm" className="gap-2" onClick={downloadErrors}>
+                  <Download className="size-4" /> Download error report
+                </Button>
+              )}
+            </div>
+            {issues
+              .filter(
+                (issue) =>
+                  issue.row === null ||
+                  !preview.rows.some((previewRow) => previewRow.row === issue.row),
+              )
+              .map((issue, index) => (
+                <p key={`${issue.field}-${index}`} className="text-sm text-destructive">
+                  {issue.field}: {issue.message}
+                </p>
+              ))}
+            <div className="max-h-[48vh] overflow-auto rounded-md border border-border">
+              <table className="w-full min-w-[1120px] text-left text-xs">
+                <thead className="sticky top-0 bg-muted text-muted-foreground">
+                  <tr>
+                    {[
+                      "Row",
+                      "First name",
+                      "Last name",
+                      "Email",
+                      "Phone",
+                      "Job code",
+                      "Source",
+                      "Years",
+                      "Skills",
+                      "Stage",
+                      "Resume URL",
+                      "Validation",
+                    ].map((heading) => (
+                      <th key={heading} className="px-2 py-2 font-medium">
+                        {heading}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {preview.rows.map(({ row, value }) => {
+                    const rowIssues = issuesByRow.get(row) ?? [];
+                    return (
+                      <tr key={row} className={rowIssues.length ? "bg-destructive/5" : ""}>
+                        <td className="px-2 py-2">{row}</td>
+                        <td className="px-2 py-2">{value.first_name}</td>
+                        <td className="px-2 py-2">{value.last_name}</td>
+                        <td className="px-2 py-2">{value.email}</td>
+                        <td className="px-2 py-2">{value.phone ?? "—"}</td>
+                        <td className="px-2 py-2">{value.job_code}</td>
+                        <td className="px-2 py-2">{value.source}</td>
+                        <td className="px-2 py-2">{value.experience_years}</td>
+                        <td className="px-2 py-2">{value.skills.join("; ") || "—"}</td>
+                        <td className="px-2 py-2">{value.current_stage}</td>
+                        <td className="max-w-48 truncate px-2 py-2">{value.resume_url ?? "—"}</td>
+                        <td className="min-w-56 px-2 py-2 text-destructive">
+                          {rowIssues.map((issue, index) => (
+                            <p key={`${issue.field}-${index}`}>
+                              {issue.field}: {issue.message}
+                            </p>
+                          ))}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {!preview.rows.length && (
+                    <tr>
+                      <td colSpan={12} className="px-3 py-5 text-center text-muted-foreground">
+                        No data rows to preview.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={importing}>
+            Cancel
+          </Button>
+          <Button
+            onClick={importRows}
+            disabled={
+              !preview ||
+              !preview.rows.length ||
+              issues.length > 0 ||
+              importing ||
+              jobs.isError ||
+              candidates.isError
+            }
+          >
+            <Upload className="mr-2 size-4" />{" "}
+            {importing ? "Importing…" : `Import ${preview?.rows.length ?? 0} candidates`}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -4,35 +4,37 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useAppSettings } from "@/hooks/use-app-settings";
 import {
-  averageHiringCycleDays,
-  candidatesQuery,
-  countUniqueStageTransitionsOnLocalDay,
-  dashboardActivityQuery,
-  daysInStage,
-  feedbackQuery,
-  formatTime,
-  fullName,
-  initials,
-  interviewsQuery,
-  isSameLocalMonth,
-  isToday,
-  jobsQuery,
-  slaLevel,
-  STAGE_LABEL,
-  STAGES,
+    averageHiringCycleDays,
+    candidatesQuery,
+    countUniqueStageTransitionsOnLocalDay,
+    dashboardActivityQuery,
+    daysInStage,
+    feedbackQuery,
+    formatTime,
+    fullName,
+    initials,
+    interviewsQuery,
+    isSameLocalMonth,
+    isSlaAtRisk,
+    isToday,
+    jobsQuery,
+    slaLevel,
+    STAGE_LABEL,
+    STAGES,
 } from "@/lib/hiring";
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
-  AlertTriangle,
-  ArrowUpRight,
-  Briefcase,
-  CalendarDays,
-  Clock,
-  FileCheck2,
-  ShieldAlert,
-  Sparkles,
+    AlertTriangle,
+    ArrowUpRight,
+    Briefcase,
+    CalendarDays,
+    Clock,
+    FileCheck2,
+    ShieldAlert,
+    Sparkles,
 } from "lucide-react";
 import type { ComponentType } from "react";
 
@@ -112,6 +114,7 @@ function Home() {
   const jobs = useQuery(jobsQuery);
   const feedback = useQuery(feedbackQuery);
   const activity = useQuery(dashboardActivityQuery);
+  const { settings } = useAppSettings();
 
   const list = candidates.data ?? [];
   const now = new Date();
@@ -139,7 +142,7 @@ function Home() {
       ? "No data"
       : `${averageCycleDays} ${averageCycleDays === 1 ? "day" : "days"}`;
   const stuck = list
-    .filter((c) => !["OFFER", "REJECTED"].includes(c.current_stage) && daysInStage(c) > 3)
+    .filter((c) => isSlaAtRisk(c, settings))
     .sort((a, b) => daysInStage(b) - daysInStage(a));
 
   const stageCounts = STAGES.map((stage) => ({
@@ -214,7 +217,7 @@ function Home() {
                 <Sparkles className="size-4 text-primary" /> AI Priority Center
               </h2>
               <p className="text-sm text-muted-foreground">
-                Candidates breaching the 3-day stage SLA — act on these first.
+                {`Candidates past the ${settings.slaWarningDays}-day stage SLA — act on these first.`}
               </p>
             </div>
             <Badge
@@ -228,7 +231,7 @@ function Home() {
           <div className="mt-4 divide-y divide-border">
             {stuck.slice(0, 6).map((c) => {
               const days = daysInStage(c);
-              const level = slaLevel(days);
+              const level = slaLevel(days, settings);
               return (
                 <div key={c.id} className="flex flex-wrap items-center gap-3 py-3">
                   <div className="flex size-9 items-center justify-center rounded-full bg-secondary text-xs font-semibold text-secondary-foreground">
